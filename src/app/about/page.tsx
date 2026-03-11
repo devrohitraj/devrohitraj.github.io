@@ -19,7 +19,7 @@ const timeline = [
   {
     company: "Allstate India",
     role: "Data Scientist — AI Center of Excellence",
-    period: "Mar 2018 – Prior",
+    period: "Mar 2018 – Dec 2019",
     description:
       "Distracted driving detection via deep learning (99% recall), real-time recommendation engines (LSTM/GRU, 2 min avg response), and defect prediction saving ~$50M/year.",
     current: false,
