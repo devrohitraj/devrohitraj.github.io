@@ -1,0 +1,152 @@
+---
+title: "Context Window Engineering: Making the Most of Long-Context LLMs"
+description: "Practical strategies for working with 128K–1M token context windows — retrieval vs. stuffing tradeoffs, context compression, position bias, and structured context packing."
+date: "2026-02-08"
+tags: ["LLM", "Context", "Architecture", "Performance"]
+category: "Engineering"
+published: true
+---
+
+## Introduction
+
+Context windows have exploded — GPT-4 Turbo offers 128K tokens, Gemini 1.5 Pro has 1M. It's tempting to stuff everything in and call it a day. But long-context LLMs have subtle failure modes that will bite you in production.
+
+This post covers the engineering discipline of **context window management** — when to use it, when to avoid it, and how to structure what you put in it.
+
+## The Lost in the Middle Problem
+
+Research consistently shows LLMs perform best on content at the **beginning and end** of the context, and poorly on content in the **middle**:
+
+$$
+\text{recall}(p) \approx \begin{cases} \text{high} & p < 0.2 \text{ (early)} \\ \text{low} & 0.2 \leq p \leq 0.8 \text{ (middle)} \\ \text{high} & p > 0.8 \text{ (late)} \end{cases}
+$$
+
+Where $p$ is the relative position of information in the context.
+
+**Implication**: For RAG with multiple retrieved chunks, put the most relevant chunks **first and last**. Don't bury critical information in the middle of a 100K-token context.
+
+## RAG vs. Long Context: When to Use Each
+
+| Scenario | Prefer RAG | Prefer Long Context |
+|----------|-----------|---------------------|
+| Static knowledge base | ✅ | ❌ |
+| Dynamic, updated info | ✅ | ❌ |
+| Single long document | ❌ | ✅ |
+| Multiple documents, complex reasoning | ❌ | ✅ (with care) |
+| Fast latency requirement | ✅ | ❌ |
+| Cost sensitivity | ✅ | ❌ |
+
+## Context Compression
+
+When you must fit more than fits, compress intelligently:
+
+### 1. Selective Truncation
+```python
+def compress_context(chunks: list[str], max_tokens: int, tokenizer) -> list[str]:
+    """Keep highest-relevance chunks that fit within budget."""
+    compressed = []
+    token_count = 0
+
+    for chunk in chunks:  # Already sorted by relevance score, desc
+        chunk_tokens = len(tokenizer.encode(chunk))
+        if token_count + chunk_tokens > max_tokens:
+            break
+        compressed.append(chunk)
+        token_count += chunk_tokens
+
+    return compressed
+```
+
+### 2. LLM-Based Summarization
+```python
+COMPRESS_PROMPT = """
+Summarize the following document section, preserving:
+- All numerical data, dates, and proper nouns
+- Key decisions and their rationale
+- Action items and their owners
+
+Be as concise as possible without losing factual content.
+
+<document>
+{text}
+</document>
+"""
+
+async def compress_document(text: str, target_ratio: float = 0.3) -> str:
+    """Compress to ~30% of original length using LLM summarization."""
+    return await llm.generate(COMPRESS_PROMPT.format(text=text))
+```
+
+## Structured Context Packing
+
+For complex multi-document tasks, structure the context explicitly:
+
+```python
+def pack_context(
+    system_instructions: str,
+    reference_documents: list[dict],
+    conversation_history: list[dict],
+    current_query: str,
+) -> str:
+    """Pack context with explicit section markers for better LLM navigation."""
+    return f"""
+<system>
+{system_instructions}
+</system>
+
+<reference_documents count="{len(reference_documents)}">
+{chr(10).join(
+    f'<document id="{i+1}" title="{doc["title"]}" relevance="{doc["score"]:.2f}">'
+    f'{doc["content"]}'
+    f'</document>'
+    for i, doc in enumerate(reference_documents)
+)}
+</reference_documents>
+
+<conversation_history>
+{chr(10).join(f'<{msg["role"]}>{msg["content"]}</{msg["role"]}>' for msg in conversation_history)}
+</conversation_history>
+
+<current_query>
+{current_query}
+</current_query>
+"""
+```
+
+The XML-like structure helps the model spatially orient itself — especially for models fine-tuned on structured formats.
+
+## Position Bias Mitigation
+
+When using many retrieved chunks, **randomize order** and **run multiple passes** with shuffled contexts:
+
+```python
+import random
+
+async def ensemble_rag(query: str, chunks: list[str], n_runs: int = 3) -> str:
+    """Mitigate position bias by running multiple shuffled context orderings."""
+    responses = []
+    for _ in range(n_runs):
+        shuffled = chunks.copy()
+        random.shuffle(shuffled)
+        context = "\n\n".join(shuffled)
+        response = await llm.generate(query=query, context=context)
+        responses.append(response)
+
+    # Aggregate with a synthesis call
+    return await llm.generate(
+        f"These are {n_runs} responses to the same query. Synthesize the best answer:\n"
+        + "\n---\n".join(responses)
+    )
+```
+
+## Key Takeaways
+
+1. **Long context ≠ better recall** — the "lost in the middle" effect is real and significant
+2. **Put critical info at start or end** of context, never in the middle
+3. **RAG is often cheaper and faster** than stuffing full documents into 1M-token contexts
+4. **XML-structured context** improves navigation for complex multi-document tasks
+
+## References
+
+- Liu et al., "Lost in the Middle: How Language Models Use Long Contexts" (2023)
+- Anthropic, "Claude's Ability to Handle Long Contexts" (2024)

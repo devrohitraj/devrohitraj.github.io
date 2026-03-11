@@ -1,0 +1,174 @@
+---
+title: "Responsible AI in Financial Services: From Principles to Practice"
+description: "How to operationalize responsible AI in a regulated industry — fairness testing, model explainability, bias audits, and building the governance infrastructure that regulators actually want to see."
+date: "2026-02-03"
+tags: ["Responsible AI", "Fairness", "Fintech", "Compliance"]
+category: "AI Research"
+published: true
+---
+
+## Introduction
+
+Every financial institution has a "Responsible AI" policy document. Far fewer have the **engineering infrastructure** to back it up. This post bridges that gap — what responsible AI looks like as actual code, processes, and monitoring systems.
+
+I'm writing from experience building AI systems in a regulated financial services environment where model decisions directly impact customers' financial lives.
+
+## The Regulatory Landscape
+
+Financial AI is governed by a patchwork of requirements:
+
+| Regulation | Jurisdiction | AI Impact |
+|-----------|-------------|-----------|
+| **SR 11-7** (Model Risk Management) | US Banks | Validation, documentation, governance |
+| **ECOA / Reg B** | USA | Fair lending, adverse action notices |
+| **EU AI Act** | EU | High-risk system obligations |
+| **FCRA** | USA | Credit decisions, consumer rights |
+| **GDPR** | EU | Automated decision-making rights |
+
+The common thread: models that affect customers must be **explainable**, **fair**, and **auditable**.
+
+## Fairness: Beyond Accuracy
+
+Aggregate accuracy hides disparate impact. Always measure fairness across protected classes:
+
+```python
+from sklearn.metrics import confusion_matrix
+import pandas as pd
+
+def compute_fairness_metrics(
+    y_true: pd.Series,
+    y_pred: pd.Series,
+    sensitive_attribute: pd.Series,
+) -> pd.DataFrame:
+    """Compute key fairness metrics across demographic groups."""
+    results = []
+
+    for group in sensitive_attribute.unique():
+        mask = sensitive_attribute == group
+        tn, fp, fn, tp = confusion_matrix(y_true[mask], y_pred[mask]).ravel()
+
+        results.append({
+            "group": group,
+            "n": mask.sum(),
+            "approval_rate": (tp + fp) / mask.sum(),
+            "tpr": tp / (tp + fn),          # True positive rate (sensitivity)
+            "fpr": fp / (fp + tn),          # False positive rate
+            "precision": tp / (tp + fp) if (tp + fp) > 0 else 0,
+        })
+
+    df = pd.DataFrame(results)
+
+    # Disparate impact ratio (80% rule): approval_rate_group / approval_rate_majority
+    majority_rate = df.loc[df["n"].idxmax(), "approval_rate"]
+    df["disparate_impact_ratio"] = df["approval_rate"] / majority_rate
+    df["passes_80_pct_rule"] = df["disparate_impact_ratio"] >= 0.8
+
+    return df
+```
+
+If any group's `disparate_impact_ratio` < 0.8, you likely have a fair lending problem regardless of whether race/gender was a feature.
+
+## Explainability: SHAP for High-Stakes Decisions
+
+For credit/lending decisions, you must be able to explain **why**:
+
+```python
+import shap
+
+explainer = shap.TreeExplainer(credit_model)
+
+def explain_decision(applicant_features: pd.DataFrame) -> dict:
+    """Generate human-readable explanation for a credit decision."""
+    shap_values = explainer(applicant_features)
+
+    # Get top factors driving the decision
+    feature_impacts = dict(zip(
+        applicant_features.columns,
+        shap_values.values[0]
+    ))
+
+    # Sort by absolute impact
+    sorted_impacts = sorted(
+        feature_impacts.items(),
+        key=lambda x: abs(x[1]),
+        reverse=True
+    )
+
+    # Generate adverse action notice factors (FCRA requirement)
+    adverse_factors = [
+        f for f, impact in sorted_impacts[:4] if impact < 0
+    ]
+
+    return {
+        "decision": "APPROVED" if credit_model.predict(applicant_features)[0] == 1 else "DECLINED",
+        "top_positive_factors": [(f, v) for f, v in sorted_impacts if v > 0][:3],
+        "top_negative_factors": [(f, v) for f, v in sorted_impacts if v < 0][:3],
+        "adverse_action_reasons": adverse_factors,  # For FCRA notice
+    }
+```
+
+## Model Governance: The SR 11-7 Framework
+
+US bank regulators expect a three-tier model governance structure:
+
+```
+┌─────────────────────────────────────────────┐
+│  Tier 1: Model Development Team             │
+│  - Builds, trains, documents the model      │
+│  - Files Model Development Document (MDD)   │
+└────────────────────┬────────────────────────┘
+                     │ submits for review
+┌────────────────────▼────────────────────────┐
+│  Tier 2: Independent Model Validation       │
+│  - Challenges assumptions & methodology     │
+│  - Tests on holdout data                    │
+│  - Files Validation Report                  │
+└────────────────────┬────────────────────────┘
+                     │ approves for use
+┌────────────────────▼────────────────────────┐
+│  Tier 3: Model Risk Management              │
+│  - Maintains model inventory                │
+│  - Monitors for degradation & drift         │
+│  - Triggers revalidation when needed        │
+└─────────────────────────────────────────────┘
+```
+
+## Automated Bias Monitoring in Production
+
+Build bias checks into your model monitoring pipeline:
+
+```python
+from evidently.metrics import DataDriftPreset
+from evidently.report import Report
+
+def weekly_bias_audit(model, production_data, reference_data):
+    """Run weekly automated bias audit — alert if thresholds breached."""
+    metrics = compute_fairness_metrics(
+        production_data["actual_default"],
+        production_data["model_prediction"],
+        production_data["protected_class"],
+    )
+
+    # Alert if any group fails the 80% rule
+    failing_groups = metrics[~metrics["passes_80_pct_rule"]]
+    if not failing_groups.empty:
+        send_alert(
+            severity="HIGH",
+            message=f"Disparate impact detected for groups: {failing_groups['group'].tolist()}",
+            data=failing_groups.to_dict("records"),
+        )
+
+    return metrics
+```
+
+## Key Takeaways
+
+1. **Fairness is measurable** — disparate impact ratio and equalized odds are concrete metrics
+2. **SHAP makes decisions explainable** and generates FCRA-compliant adverse action reasons
+3. **SR 11-7 governance structure** is what US bank regulators actually inspect
+4. **Automate bias monitoring** — weekly bias audits prevent slow drift from becoming a legal problem
+
+## References
+
+- Mehrabi et al., "A Survey on Bias and Fairness in Machine Learning" (2021)
+- Board of Governors, FRS "SR 11-7: Guidance on Model Risk Management" (2011)

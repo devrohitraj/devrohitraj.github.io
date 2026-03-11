@@ -1,0 +1,115 @@
+---
+title: "Fine-Tuning Domain-Specific LLMs: A Practitioner's Guide for Regulated Industries"
+description: "End-to-end guide to fine-tuning LLMs for domain-specific tasks in regulated industries — covering data curation, LoRA/QLoRA, evaluation, and compliance considerations."
+date: "2026-01-15"
+tags: ["LLM", "Fine-tuning", "Compliance", "NLP"]
+category: "AI Research"
+published: true
+---
+
+## Introduction
+
+While general-purpose LLMs are remarkably capable, regulated industries like finance need models that understand **domain-specific terminology, compliance requirements, and organizational context**. Fine-tuning bridges this gap — but doing it right in a regulated environment requires careful planning.
+
+## When to Fine-Tune (vs. Prompt Engineering vs. RAG)
+
+```
+┌─────────────────────┬─────────────┬────────────┬──────────────┐
+│ Approach            │ Cost        │ Customization │ Data needed │
+├─────────────────────┼─────────────┼────────────┼──────────────┤
+│ Prompt Engineering  │ Low         │ Low-Medium  │ None         │
+│ RAG                 │ Medium      │ Medium      │ Knowledge base│
+│ Fine-tuning         │ High        │ High        │ 1K-100K examples│
+│ Pre-training        │ Very High   │ Very High   │ Billions tokens│
+└─────────────────────┴─────────────┴────────────┴──────────────┘
+```
+
+**Fine-tune when**: You need consistent style/format, domain vocabulary, or behavior that prompting alone can't achieve.
+
+## Step 1: Data Curation
+
+Quality > quantity. For financial fine-tuning:
+
+```python
+# Example: Creating instruction-tuning data from internal docs
+training_example = {
+    "instruction": "Summarize the key risk factors from this 10-K filing section.",
+    "input": "The Company is subject to credit risk... [truncated]",
+    "output": "Key risk factors include: (1) credit exposure concentration "
+              "in consumer lending, (2) interest rate sensitivity of the "
+              "fixed-income portfolio, (3) regulatory capital requirements..."
+}
+```
+
+### Data quality checklist:
+- [ ] No PII or sensitive customer data
+- [ ] Reviewed by domain experts
+- [ ] Balanced across task types
+- [ ] Includes edge cases and rare scenarios
+
+## Step 2: LoRA / QLoRA Fine-Tuning
+
+Parameter-efficient fine-tuning via Low-Rank Adaptation:
+
+$$
+W' = W + \Delta W = W + BA
+$$
+
+Where $B \in \mathbb{R}^{d \times r}$ and $A \in \mathbb{R}^{r \times k}$ with rank $r \ll \min(d, k)$.
+
+```python
+from peft import LoraConfig, get_peft_model
+
+lora_config = LoraConfig(
+    r=16,                       # Rank
+    lora_alpha=32,              # Scaling factor
+    target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+    lora_dropout=0.05,
+    bias="none",
+    task_type="CAUSAL_LM",
+)
+
+model = get_peft_model(base_model, lora_config)
+# Only ~0.1% of parameters are trainable
+print(f"Trainable: {model.num_parameters(only_trainable=True):,}")
+```
+
+## Step 3: Compliance Considerations
+
+In regulated industries, fine-tuning introduces unique requirements:
+
+1. **Data lineage**: Track exactly which data was used for training
+2. **Model cards**: Document model capabilities, limitations, and intended use
+3. **Bias testing**: Evaluate for protected-class disparities
+4. **Reproducibility**: Pin random seeds, library versions, and hardware specs
+
+## Step 4: Evaluation
+
+Compare fine-tuned vs. base model on domain-specific benchmarks:
+
+```python
+# Domain-specific evaluation suite
+eval_tasks = [
+    ("regulatory_qa", regulatory_dataset, accuracy_metric),
+    ("risk_summarization", risk_dataset, rouge_metric),
+    ("compliance_classification", compliance_dataset, f1_metric),
+    ("financial_ner", ner_dataset, entity_f1_metric),
+]
+
+for task_name, dataset, metric in eval_tasks:
+    base_score = evaluate(base_model, dataset, metric)
+    ft_score = evaluate(finetuned_model, dataset, metric)
+    print(f"{task_name}: Base={base_score:.3f}, FT={ft_score:.3f}")
+```
+
+## Key Takeaways
+
+1. **Start with prompt engineering + RAG** — fine-tune only when these plateau
+2. **QLoRA makes fine-tuning accessible** — a 70B model can be fine-tuned on a single GPU
+3. **Data quality is everything** — 500 expert-curated examples often beat 50K noisy ones
+4. **Compliance is a first-class requirement** — build data governance into your fine-tuning pipeline from day one
+
+## References
+
+- Hu et al., "LoRA: Low-Rank Adaptation of Large Language Models" (2021)
+- Dettmers et al., "QLoRA: Efficient Finetuning of Quantized Language Models" (2023)

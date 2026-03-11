@@ -1,0 +1,84 @@
+---
+title: "Scaling LLM Inference at Enterprise Scale: Lessons from Production"
+description: "A practitioner's guide to optimizing LLM inference for high-throughput, low-latency enterprise workloads — covering quantization, batching, caching, and speculative decoding."
+date: "2026-02-25"
+tags: ["LLM", "Infrastructure", "Performance", "MLOps"]
+category: "Engineering"
+published: true
+---
+
+## Introduction
+
+Deploying an LLM is easy. Deploying it at **100K+ requests/day with p99 latency under 500ms** is where the real engineering begins. This post covers the techniques we use to scale LLM inference for production fintech workloads.
+
+## The Latency-Cost Tradeoff
+
+Every optimization in LLM inference involves a tradeoff between three variables:
+
+$$
+\text{Optimization Space} = f(\text{Latency}, \text{Throughput}, \text{Quality})
+$$
+
+You can rarely improve all three simultaneously. The key is understanding which tradeoffs your use case can tolerate.
+
+## Technique 1: Quantization
+
+Reducing model precision from FP16 to INT8/INT4 can cut memory usage by 2-4x with minimal quality loss:
+
+```python
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+
+quantization_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_compute_dtype="float16",
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_use_double_quant=True,
+)
+
+model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Llama-3-70B",
+    quantization_config=quantization_config,
+    device_map="auto",
+)
+```
+
+**Impact**: 70B model fits on a single A100 (80GB) with ~1-2% quality degradation on benchmarks.
+
+## Technique 2: Continuous Batching
+
+Traditional static batching wastes GPU cycles waiting for the longest sequence. **Continuous batching** dynamically adds/removes requests from the batch:
+
+```
+Throughput improvement: 2-5x over static batching
+Tools: vLLM, TensorRT-LLM, TGI
+```
+
+## Technique 3: KV-Cache Optimization
+
+The key-value cache grows linearly with sequence length and batch size. Techniques to manage it:
+
+- **PagedAttention** (vLLM): Manages KV-cache like virtual memory pages
+- **Sliding window**: Fixed-size attention window for long contexts
+- **Prefix caching**: Share KV-cache across requests with common system prompts
+
+## Technique 4: Speculative Decoding
+
+Use a small "draft" model to generate $k$ candidate tokens, then verify in parallel with the large model:
+
+$$
+\text{Speedup} \approx \frac{k}{1 + (1 - \alpha)k}
+$$
+
+Where $\alpha$ is the acceptance rate of the draft model's predictions.
+
+## Key Takeaways
+
+1. **Start with quantization** — it's the highest ROI optimization
+2. **Use vLLM or TGI** for serving — they handle continuous batching and PagedAttention out of the box
+3. **Profile before optimizing** — use tools like `torch.profiler` to identify actual bottlenecks
+4. **Cache aggressively** — system prompts, common queries, and embeddings
+
+## References
+
+- Kwon et al., "Efficient Memory Management for Large Language Model Serving with PagedAttention" (2023)
+- Leviathan et al., "Fast Inference from Transformers via Speculative Decoding" (2023)

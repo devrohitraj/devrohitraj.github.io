@@ -1,0 +1,203 @@
+---
+title: "CI/CD for Machine Learning: Automating Model Validation and Deployment"
+description: "Building a proper CI/CD pipeline for ML — automated model testing, data validation, performance regression checks, and safe deployment patterns including canary releases and shadow mode."
+date: "2026-01-12"
+tags: ["MLOps", "CI/CD", "DevOps", "ML"]
+category: "Engineering"
+published: true
+---
+
+## Introduction
+
+Software engineers have decades of CI/CD best practices. ML teams often ignore them. The result: models deployed without validation, silent regressions discovered weeks later, no rollback capability.
+
+This post brings proper software engineering discipline to ML model deployment.
+
+## The ML CI/CD Pipeline
+
+```
+Code Push (model code / training script)
+    │
+    ▼
+┌──────────────┐
+│ Static       │ ← Lint, type-check, unit tests for data/feature code
+│ Checks       │
+└──────┬───────┘
+       │ pass
+    ▼
+┌──────────────┐
+│ Data         │ ← Schema validation, drift detection vs. last run
+│ Validation   │
+└──────┬───────┘
+       │ pass
+    ▼
+┌──────────────┐
+│ Model        │ ← Train on CI data, evaluate on holdout
+│ Training     │
+└──────┬───────┘
+       │ model meets thresholds
+    ▼
+┌──────────────┐
+│ Regression   │ ← Compare vs. production model on benchmark slice
+│ Testing      │
+└──────┬───────┘
+       │ no regression
+    ▼
+┌──────────────┐
+│ Shadow Mode  │ ← Run alongside production, log predictions (no action)
+└──────┬───────┘
+       │ shadow metrics acceptable
+    ▼
+┌──────────────┐
+│ Canary (5%)  │ ← Route 5% of traffic, monitor KPIs
+└──────┬───────┘
+       │ stable
+    ▼
+┌──────────────┐
+│ Full Rollout │ ← Gradual ramp to 100%
+└──────────────┘
+```
+
+## Step 1: Data Validation with Great Expectations
+
+Catch data quality issues before they corrupt your model:
+
+```python
+import great_expectations as ge
+
+def validate_training_data(df_path: str) -> bool:
+    """Validate training data against defined expectations."""
+    df = ge.read_csv(df_path)
+
+    results = df.expect_column_to_exist("customer_id") \
+        .expect_column_values_to_not_be_null("label") \
+        .expect_column_median_to_be_between("credit_score", 600, 750) \
+        .expect_column_values_to_be_between("loan_amount", 1_000, 500_000) \
+        .expect_column_values_to_be_in_set("risk_tier", ["LOW", "MEDIUM", "HIGH"])
+
+    if not results["success"]:
+        failed = [r for r in results["results"] if not r["success"]]
+        print(f"Data validation failed: {failed}")
+        return False
+
+    return True
+```
+
+## Step 2: Model Performance Gates
+
+Hard enforce minimum performance thresholds before any model is promoted:
+
+```python
+# .github/model_thresholds.yaml
+thresholds:
+  auc_roc: 0.82          # Must beat this or pipeline fails
+  precision_at_5pct: 0.65
+  max_fpr_at_recall_80: 0.12
+  fairness:
+    min_disparate_impact: 0.80
+    max_equalized_odds_gap: 0.05
+
+# In CI pipeline
+def check_model_gates(metrics: dict, thresholds: dict) -> bool:
+    failures = []
+    for metric, threshold in thresholds.items():
+        if isinstance(threshold, dict):
+            continue  # Handle nested (fairness)
+        if metrics.get(metric, 0) < threshold:
+            failures.append(f"{metric}: {metrics[metric]:.4f} < {threshold}")
+
+    if failures:
+        print("❌ Model gates FAILED:")
+        for f in failures:
+            print(f"   {f}")
+        return False
+
+    print("✅ All model gates passed")
+    return True
+```
+
+## Step 3: GitHub Actions Workflow
+
+```yaml
+# .github/workflows/ml-pipeline.yml
+name: ML Model Pipeline
+
+on:
+  push:
+    paths:
+      - 'models/**'
+      - 'features/**'
+      - 'training/**'
+
+jobs:
+  validate-and-train:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run data validation
+        run: python scripts/validate_data.py --data-path data/training.csv
+
+      - name: Train model
+        run: python training/train.py --config config/prod.yaml
+
+      - name: Evaluate model
+        run: python scripts/evaluate.py --model-path artifacts/model.pkl
+
+      - name: Check performance gates
+        run: python scripts/check_gates.py --metrics artifacts/metrics.json
+
+      - name: Register model if gates pass
+        if: success()
+        run: python scripts/register_model.py --stage "Staging"
+```
+
+## Step 4: Shadow Mode Deployment
+
+Run the new model alongside production — log everything, act on nothing:
+
+```python
+class ShadowDeployment:
+    def __init__(self, production_model, shadow_model, log_store):
+        self.prod = production_model
+        self.shadow = shadow_model
+        self.logs = log_store
+
+    async def predict(self, features: dict) -> float:
+        """Return production prediction; log shadow prediction asynchronously."""
+        prod_score = self.prod.predict(features)
+
+        # Fire-and-forget for shadow
+        asyncio.create_task(self._log_shadow(features, prod_score))
+
+        return prod_score  # Users always get production prediction
+
+    async def _log_shadow(self, features, prod_score):
+        shadow_score = self.shadow.predict(features)
+        await self.logs.write({
+            "features_hash": hash(str(features)),
+            "prod_score": prod_score,
+            "shadow_score": shadow_score,
+            "delta": abs(prod_score - shadow_score),
+        })
+```
+
+## Key Takeaways
+
+1. **Treat data as a first-class CI artifact** — validate schema and distributions before training
+2. **Performance gates are non-negotiable** — hardcode minimums, fail the pipeline if not met
+3. **Shadow mode builds confidence** before any customer impact
+4. **Canary deployments with automatic rollback** are the safest path to full deployment
+
+## References
+
+- Breck et al., "The ML Test Score: A Rubric for ML Production Readiness" (2017)
+- Sculley et al., "Hidden Technical Debt in Machine Learning Systems" (NIPS 2015)

@@ -1,0 +1,104 @@
+---
+title: "Evaluating LLM Systems: Metrics, Benchmarks & Human-in-the-Loop"
+description: "A framework for evaluating LLM-powered systems in production — covering automated metrics, human evaluation protocols, and continuous monitoring for enterprise applications."
+date: "2026-01-28"
+tags: ["LLM", "Evaluation", "MLOps", "Quality"]
+category: "Engineering"
+published: true
+---
+
+## Introduction
+
+"Is it good enough?" is the hardest question in LLM engineering. Unlike traditional ML where you have clear metrics (accuracy, F1, AUC), evaluating LLM systems requires a **multi-dimensional approach** that combines automated metrics, human judgment, and domain-specific criteria.
+
+## The Evaluation Taxonomy
+
+LLM evaluation spans three levels:
+
+```
+Level 1: Component Evaluation
+  └── Model quality, retrieval accuracy, tool execution
+
+Level 2: System Evaluation
+  └── End-to-end task completion, latency, cost
+
+Level 3: Production Evaluation
+  └── User satisfaction, business impact, safety
+```
+
+## Automated Metrics
+
+### Retrieval Quality
+
+For RAG systems, measure context quality before generation:
+
+$$
+\text{Context Precision} = \frac{|\text{Relevant chunks in top-k}|}{k}
+$$
+
+$$
+\text{Context Recall} = \frac{|\text{Relevant chunks retrieved}|}{|\text{Total relevant chunks}|}
+$$
+
+### Generation Quality
+
+```python
+# Using an LLM-as-judge for automated evaluation
+EVAL_PROMPT = """
+Rate the following response on a scale of 1-5 for:
+1. Factual accuracy
+2. Completeness
+3. Relevance to query
+4. Clarity of explanation
+
+Query: {query}
+Context: {context}
+Response: {response}
+
+Return JSON: {"accuracy": int, "completeness": int, "relevance": int, "clarity": int}
+"""
+
+async def evaluate_response(query, context, response, judge_llm):
+    result = await judge_llm.generate(
+        EVAL_PROMPT.format(query=query, context=context, response=response)
+    )
+    return json.loads(result)
+```
+
+## Human Evaluation Protocol
+
+Automated metrics have blind spots. Establish a regular human evaluation cadence:
+
+| Cadence | Method | Sample Size | Focus |
+|---------|--------|------------|-------|
+| Daily | Auto-flagged edge cases | 10-20 | Catch regressions |
+| Weekly | Random sample review | 50-100 | Overall quality trend |
+| Monthly | Expert deep-dive | 20-30 | Domain accuracy |
+
+## Continuous Monitoring
+
+In production, track drift signals:
+
+```python
+# Monitor embedding distribution drift
+from scipy.stats import ks_2samp
+
+def detect_drift(reference_embeddings, current_embeddings):
+    statistic, p_value = ks_2samp(
+        reference_embeddings.mean(axis=1),
+        current_embeddings.mean(axis=1),
+    )
+    return p_value < 0.05  # Drift detected
+```
+
+## Key Takeaways
+
+1. **No single metric captures LLM quality** — use a balanced scorecard
+2. **LLM-as-judge scales automated evaluation** but needs calibration against human ratings
+3. **Human evaluation is irreplaceable** for nuance, especially in regulated domains
+4. **Monitor continuously** — LLM quality can degrade silently as data distributions shift
+
+## References
+
+- Zheng et al., "Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena" (2023)
+- Chang et al., "A Survey on Evaluation of Large Language Models" (2023)

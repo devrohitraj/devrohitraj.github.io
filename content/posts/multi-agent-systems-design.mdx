@@ -1,0 +1,167 @@
+---
+title: "Multi-Agent Systems: Designing Collaborative AI Architectures"
+description: "How to architect multi-agent systems where specialized LLM agents collaborate, delegate, and critique each other — covering orchestration patterns, communication protocols, and failure modes."
+date: "2026-01-25"
+tags: ["Agents", "LLM", "Architecture", "Multi-Agent"]
+category: "AI Research"
+published: true
+---
+
+## Introduction
+
+Single-agent LLM systems hit a ceiling — they're generalists, and generalists are outperformed by specialists on complex tasks. Multi-agent systems coordinate specialist agents to tackle problems that require diverse expertise, parallel execution, or adversarial checking.
+
+This post covers the key architectural patterns and the engineering decisions that determine whether your multi-agent system works or collapses into an incoherent loop.
+
+## When Single-Agent Fails
+
+A single agent asked to "analyze this 10-K filing and identify covenant violations" must simultaneously:
+- Parse dense financial language
+- Understand legal terminology
+- Map accounting figures to specific covenants
+- Cross-reference multiple sections
+
+This context-switching degrades quality. A well-designed multi-agent system separates these concerns.
+
+## Core Multi-Agent Patterns
+
+### Pattern 1: Orchestrator + Specialists (Most Common)
+
+```
+User Query
+    │
+    ▼
+┌──────────┐     task decomposition     ┌─────────────┐
+│Orchestr- │ ─────────────────────────▶ │  Financial  │
+│  rator   │                            │  Analyst    │
+│  Agent   │ ─────────────────────────▶ │  Legal      │
+└──────────┘                            │  Analyst    │
+    │ aggregate                         │             │
+    ▼                                   │  Risk       │
+Final Answer                            │  Assessor   │
+                                        └─────────────┘
+```
+
+```python
+class OrchestratorAgent:
+    def __init__(self, specialists: dict[str, Agent]):
+        self.specialists = specialists
+        self.llm = LLM(model="gpt-4o")
+
+    async def run(self, task: str) -> str:
+        # Decompose task into sub-tasks
+        plan = await self.llm.generate(
+            DECOMPOSE_PROMPT.format(
+                task=task,
+                available_agents=list(self.specialists.keys()),
+            )
+        )
+        subtasks = parse_plan(plan)
+
+        # Execute in parallel where possible
+        results = await asyncio.gather(*[
+            self.specialists[subtask.agent].run(subtask.instruction)
+            for subtask in subtasks
+            if subtask.parallel
+        ])
+
+        # Execute sequential subtasks
+        for subtask in subtasks:
+            if not subtask.parallel:
+                result = await self.specialists[subtask.agent].run(subtask.instruction)
+                results.append(result)
+
+        # Synthesize results
+        return await self.llm.generate(
+            SYNTHESIZE_PROMPT.format(task=task, results=results)
+        )
+```
+
+### Pattern 2: Critic-Actor (Quality Improvement)
+
+Add a dedicated critic agent that reviews and challenges the actor's output:
+
+```python
+async def critic_actor_loop(task: str, max_rounds: int = 3) -> str:
+    actor = SpecialistAgent("analyst")
+    critic = SpecialistAgent("critic")
+
+    response = await actor.run(task)
+
+    for round_num in range(max_rounds):
+        critique = await critic.run(
+            f"Critique this response for accuracy, completeness, and logical errors:\n\n{response}"
+        )
+
+        if "APPROVED" in critique:
+            break
+
+        # Actor revises based on critique
+        response = await actor.run(
+            f"Original task: {task}\n\nYour response:\n{response}\n\nCritique:\n{critique}\n\nRevise:"
+        )
+
+    return response
+```
+
+### Pattern 3: Debate (Adversarial Accuracy)
+
+Two agents argue opposing positions; a judge synthesizes:
+
+```python
+async def structured_debate(topic: str) -> str:
+    agent_a = Agent("advocate")   # Argues FOR
+    agent_b = Agent("skeptic")    # Argues AGAINST
+    judge = Agent("arbitrator")   # Synthesizes truth
+
+    position_a = await agent_a.run(f"Argue FOR: {topic}")
+    position_b = await agent_b.run(f"Argue AGAINST: {topic}. Counter: {position_a}")
+    rebuttal_a = await agent_a.run(f"Rebut: {position_b}")
+
+    return await judge.run(
+        f"""Synthesize an evidence-based conclusion from this debate:
+Topic: {topic}
+Position A: {position_a}
+Position B: {position_b}
+Rebuttal: {rebuttal_a}"""
+    )
+```
+
+## Communication Protocols
+
+Agent communication needs to be structured — free-form natural language between agents degrades quickly:
+
+```python
+from pydantic import BaseModel
+from typing import Literal
+
+class AgentMessage(BaseModel):
+    sender: str
+    recipient: str
+    message_type: Literal["task", "result", "clarification", "error"]
+    content: str
+    requires_response: bool
+    correlation_id: str  # For tracking request-response pairs
+    metadata: dict = {}
+```
+
+## Failure Modes
+
+| Failure | Cause | Prevention |
+|---------|-------|-----------|
+| **Infinite loops** | Agents keep deferring to each other | Max rounds + timeout |
+| **Context explosion** | Full conversation passed to every agent | Summarize inter-agent messages |
+| **Sycophancy cascade** | Critic always approves to avoid conflict | Adversarial framing in critic prompt |
+| **Hallucination amplification** | Wrong facts accepted and built upon | Ground truth retrieval before synthesis |
+
+## Key Takeaways
+
+1. **Orchestrator + Specialists** is the right default — simple, debuggable, effective
+2. **Critic-Actor loops** improve quality significantly for high-stakes tasks
+3. **Structured messages** (Pydantic schemas) prevent the agent communication chaos
+4. **Set hard limits** on rounds and context size — they prevent infinite loops
+
+## References
+
+- Wu et al., "AutoGen: Enabling Next-Gen LLM Applications via Multi-Agent Conversation" (2023)
+- Du et al., "Improving Factuality and Reasoning in Language Models through Multiagent Debate" (2023)

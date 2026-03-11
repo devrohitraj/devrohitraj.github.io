@@ -1,0 +1,124 @@
+---
+title: "Fraud Detection with Graph Neural Networks: Beyond Tabular Features"
+description: "How graph neural networks capture transaction relationships that tabular ML misses — architecture, feature engineering, and deployment patterns for real-time fraud detection."
+date: "2026-02-14"
+tags: ["GNN", "Fraud Detection", "Fintech", "Deep Learning"]
+category: "AI Research"
+published: true
+---
+
+## Introduction
+
+Traditional fraud detection treats each transaction in isolation — a tabular record with features like amount, merchant, time, and device. This misses everything that makes fraud *fraud*: the **relationships** between accounts, devices, merchants, and transactions.
+
+Graph Neural Networks change this. By modelling transaction networks explicitly, GNNs can detect fraud rings and mule networks that are invisible to tabular models.
+
+## Why Graphs?
+
+A fraud ring looks like this in graph form:
+
+```
+[Account A] ──txn──▶ [Merchant X] ◀──txn── [Account B]
+     │                                             │
+     └──device_fingerprint── [Device D] ──────────┘
+                                    │
+                         [Account C] ──txn──▶ [Merchant Y]
+```
+
+The ring is only visible when you look at the **pattern of connections** — accounts sharing devices, merchants, IP addresses — not the individual transactions. A tabular model looking at any single transaction sees nothing unusual. A GNN sees the coordinated structure.
+
+## Graph Construction
+
+Model cards for nodes and edges:
+
+```python
+# Node types
+nodes = {
+    "account": {
+        "features": ["age_days", "credit_score", "avg_balance", "country_risk"],
+    },
+    "device": {
+        "features": ["os_type", "browser", "seen_accounts_count"],
+    },
+    "merchant": {
+        "features": ["category", "avg_txn_amount", "fraud_rate_90d"],
+    },
+}
+
+# Edge types (with timestamps for temporal graphs)
+edges = {
+    "account_to_merchant": "transaction",   # Account --> Merchant
+    "account_to_device": "uses",            # Account <-> Device
+    "account_to_account": "transfers",      # Account --> Account (P2P)
+}
+```
+
+## GNN Architecture: GraphSAGE for Fraud
+
+GraphSAGE aggregates neighbor features without requiring the full graph in memory — critical for production:
+
+$$
+h_v^{(k)} = \sigma\left(W^{(k)} \cdot \text{CONCAT}\left(h_v^{(k-1)}, \text{AGG}\left(\{h_u^{(k-1)}: u \in \mathcal{N}(v)\}\right)\right)\right)
+$$
+
+```python
+import torch
+import torch.nn as nn
+from torch_geometric.nn import SAGEConv
+
+class FraudGNN(nn.Module):
+    def __init__(self, in_channels: int, hidden: int = 128, layers: int = 3):
+        super().__init__()
+        self.convs = nn.ModuleList()
+        self.convs.append(SAGEConv(in_channels, hidden))
+        for _ in range(layers - 2):
+            self.convs.append(SAGEConv(hidden, hidden))
+        self.convs.append(SAGEConv(hidden, hidden))
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden, 64),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(64, 1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x, edge_index):
+        for conv in self.convs[:-1]:
+            x = conv(x, edge_index).relu()
+        x = self.convs[-1](x, edge_index)
+        return self.classifier(x).squeeze(-1)
+```
+
+## Temporal Graphs: Adding Time
+
+Static graphs miss behavioral drift. Temporal GNNs track how relationships evolve:
+
+```python
+# Filter edges to a time window — "what did the graph look like 7 days ago?"
+def get_temporal_subgraph(graph, reference_time, lookback_days=30):
+    cutoff = reference_time - timedelta(days=lookback_days)
+    mask = (graph.edge_attr[:, 0] >= cutoff.timestamp()) & \
+           (graph.edge_attr[:, 0] <= reference_time.timestamp())
+    return graph.edge_index[:, mask], graph.edge_attr[mask]
+```
+
+## Production Considerations
+
+| Challenge | Solution |
+|-----------|----------|
+| Real-time inference | Precompute neighborhood embeddings, update incrementally |
+| Graph scale (billions of edges) | Distributed training with PyG + Ray |
+| Cold start (new accounts) | Fallback to tabular model until graph context builds |
+| Explainability | GNNExplainer for node/edge importance attribution |
+
+## Key Takeaways
+
+1. **Fraud rings are invisible to tabular ML** — you need graph structure to see them
+2. **GraphSAGE is production-friendly** — mini-batch sampling avoids full-graph memory
+3. **Temporal graphs** are more realistic but significantly more complex to build and serve
+4. **Combine GNN + tabular** for the best of both worlds
+
+## References
+
+- Hamilton et al., "Inductive Representation Learning on Large Graphs" (2017)
+- Weber et al., "Anti-Money Laundering in Bitcoin: Experimenting with Graph Convolutional Networks" (2019)

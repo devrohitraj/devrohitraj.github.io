@@ -1,0 +1,148 @@
+---
+title: "Embeddings in Practice: From Word2Vec to Modern Sentence Transformers"
+description: "A practical guide to text embeddings — understanding the math, choosing the right model, fine-tuning for domain adaptation, and common pitfalls in production embedding pipelines."
+date: "2026-01-20"
+tags: ["Embeddings", "NLP", "Search", "LLM"]
+category: "Engineering"
+published: true
+---
+
+## Introduction
+
+Embeddings are the lingua franca of modern NLP. Every RAG system, semantic search engine, and recommendation system runs on them. But they're often treated as a black box — you call an API and get a vector back. Understanding what's actually happening makes you dramatically better at using them.
+
+## What Is an Embedding?
+
+An embedding maps discrete tokens/text to a continuous vector space where **semantic similarity corresponds to geometric proximity**:
+
+$$
+f: \mathcal{T} \rightarrow \mathbb{R}^d
+$$
+
+Where $\mathcal{T}$ is the text space and $d$ is the embedding dimension (typically 384–3072).
+
+The magic: `"car"` and `"automobile"` map to nearby vectors; `"car"` and `"democracy"` map to distant vectors.
+
+## The Evolution from Word to Sentence
+
+### Word2Vec (2013)
+Context-free, one vector per word regardless of usage:
+
+```python
+# king - man + woman ≈ queen (famous example)
+king_vec = model["king"]
+queen_approx = king_vec - model["man"] + model["woman"]
+# cosine_similarity(queen_approx, model["queen"]) ≈ 0.85
+```
+
+**Problem**: "bank" (financial) and "bank" (river) get the same vector.
+
+### BERT (2018)
+Context-aware — each token gets a different vector based on surrounding context. But it only outputs token-level embeddings — you need pooling to get sentence-level.
+
+**Mean pooling** (often best):
+$$
+\mathbf{e}_{sentence} = \frac{1}{n}\sum_{i=1}^{n} \mathbf{h}_i
+$$
+
+### Sentence-BERT / Sentence Transformers (2019+)
+Specifically trained for **sentence-level semantic similarity** using siamese networks and contrastive loss:
+
+$$
+\mathcal{L} = \max(0, \epsilon - \text{sim}(\mathbf{e}_a, \mathbf{e}_{pos}) + \text{sim}(\mathbf{e}_a, \mathbf{e}_{neg}))
+$$
+
+Where $\epsilon$ is a margin. This pushes similar sentences together and dissimilar ones apart.
+
+## Choosing the Right Embedding Model
+
+```python
+# Benchmarking — always test on YOUR data before choosing
+from sentence_transformers import SentenceTransformer
+from sentence_transformers.evaluation import InformationRetrievalEvaluator
+
+models_to_test = [
+    "BAAI/bge-large-en-v1.5",          # Best overall (2024)
+    "text-embedding-3-large",           # OpenAI, strong on diverse tasks
+    "intfloat/e5-mistral-7b-instruct",  # GPU required, best quality
+    "all-MiniLM-L6-v2",                # Fastest, smallest
+]
+
+for model_name in models_to_test:
+    model = SentenceTransformer(model_name)
+    evaluator = InformationRetrievalEvaluator(
+        queries=your_queries,
+        corpus=your_documents,
+        relevant_docs=ground_truth,
+    )
+    score = evaluator(model)
+    print(f"{model_name}: {score['ndcg@10']:.4f}")
+```
+
+## Fine-Tuning for Domain Adaptation
+
+General-purpose embeddings underperform on specialized domains (legal, medical, financial). Fine-tune with your data:
+
+```python
+from sentence_transformers import SentenceTransformer, losses
+from torch.utils.data import DataLoader
+
+# Create training pairs — (anchor, positive, negative)
+train_examples = [
+    InputExample(
+        texts=["credit default swap", "CDS contract", "equity derivative"],
+        label=0  # 0 = triplet (anchor, pos, neg)
+    ),
+    # ... more examples from your domain
+]
+
+model = SentenceTransformer("BAAI/bge-large-en-v1.5")
+train_dataloader = DataLoader(train_examples, shuffle=True, batch_size=16)
+train_loss = losses.TripletLoss(model=model)
+
+model.fit(
+    train_objectives=[(train_dataloader, train_loss)],
+    epochs=3,
+    warmup_steps=100,
+    output_path="./financial-embeddings-v1",
+)
+```
+
+## Common Pitfalls
+
+### 1. Asymmetric Queries and Documents
+Most embedding models are trained with symmetric pairs. For RAG, you often have short queries vs. long documents — use **instruction-following models** or **bi-encoder with query prefix**:
+
+```python
+# BGE models use explicit query/document prefixes
+query_embedding = model.encode(
+    "Represent this sentence for searching relevant passages: " + query
+)
+doc_embeddings = model.encode(documents)  # No prefix for docs
+```
+
+### 2. Dimension is Not Quality
+Larger dimension ≠ better. `text-embedding-3-small` (1536-dim) often beats older `text-embedding-ada-002` despite same dimensions.
+
+### 3. Normalization
+For cosine similarity, always L2-normalize your embeddings:
+
+```python
+import numpy as np
+embeddings = model.encode(texts)
+embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+# Now dot product == cosine similarity
+```
+
+## Key Takeaways
+
+1. **Always benchmark on your own data** — MTEB leaderboard rankings don't translate directly
+2. **Fine-tune for domain adaptation** — 1K high-quality training pairs can give 10-15% improvement
+3. **Use instruction prefixes** for asymmetric retrieval tasks
+4. **L2-normalize** before storing in your vector database
+
+## References
+
+- Mikolov et al., "Distributed Representations of Words and Phrases" (2013)
+- Reimers & Gurevych, "Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks" (2019)
+- Muennighoff et al., "MTEB: Massive Text Embedding Benchmark" (2022)

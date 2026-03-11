@@ -1,0 +1,92 @@
+---
+title: "Agentic Workflows in Fintech: Orchestrating LLM Agents for Autonomous Decision-Making"
+description: "How autonomous AI agents are transforming financial services — from loan underwriting to fraud investigation — and the architectural patterns that make them production-ready."
+date: "2026-03-10"
+tags: ["LLM", "Agents", "Fintech", "Architecture"]
+category: "AI Research"
+published: true
+---
+
+## Introduction
+
+The convergence of large language models and agentic architectures is opening new frontiers in financial services. Unlike traditional ML pipelines that output a single prediction, agentic workflows enable **autonomous, multi-step reasoning** — an LLM that can plan, use tools, retrieve documents, and take actions in a loop until a task is complete.
+
+At American Express, we've been exploring how these patterns can transform core banking operations. This post distills our learnings.
+
+## The Problem: Why Static Pipelines Fall Short
+
+Traditional ML in fintech follows a rigid predict → threshold → action pattern:
+
+```python
+# Traditional pipeline — brittle, single-step
+prediction = model.predict(transaction_features)
+if prediction > FRAUD_THRESHOLD:
+    block_transaction()
+```
+
+This works for well-defined tasks but struggles with **ambiguous, multi-faceted decisions** — e.g., investigating a suspicious pattern across multiple accounts that requires cross-referencing documents, policies, and transaction histories.
+
+## Architecture: The Agent Loop
+
+The core of an agentic system is the **ReAct loop** (Reason + Act):
+
+$$
+\text{Agent}(s_t) = \text{LLM}(s_t, \text{tools}, \text{memory}) \rightarrow (a_t, s_{t+1})
+$$
+
+Where $s_t$ is the current state, $a_t$ is an action (tool call), and the cycle repeats until a termination condition is met.
+
+```python
+class FinancialAgent:
+    def __init__(self, llm, tools, memory):
+        self.llm = llm
+        self.tools = tools
+        self.memory = memory
+
+    async def run(self, task: str) -> str:
+        """Execute the agent loop until task completion."""
+        self.memory.add("user", task)
+
+        for step in range(MAX_STEPS):
+            response = await self.llm.generate(
+                messages=self.memory.messages,
+                tools=self.tools.schema(),
+            )
+
+            if response.is_final:
+                return response.content
+
+            # Execute tool call
+            result = await self.tools.execute(response.tool_call)
+            self.memory.add("tool", result)
+
+        return "Max steps reached"
+```
+
+## Key Design Decisions
+
+### 1. Tool Design Granularity
+Keep tools **atomic and composable**. A `search_transactions` tool should not also filter and summarize — let the LLM compose smaller primitives.
+
+### 2. Guardrails for Regulated Environments
+In fintech, agents must operate within strict compliance boundaries:
+
+- **Action allowlists**: Only pre-approved tools can be called
+- **Human-in-the-loop**: High-value decisions require human approval
+- **Audit trails**: Every reasoning step is logged immutably
+
+### 3. Memory Architecture
+Short-term (conversation) + long-term (vector DB) memory enables agents to learn from past investigations without retraining.
+
+## Key Takeaways
+
+1. Agentic workflows excel at **ambiguous, multi-step tasks** that traditional pipelines can't handle
+2. **Tool design** is more important than model choice — well-designed tools make mediocre models effective
+3. **Guardrails are non-negotiable** in regulated industries — build them into the architecture, not as afterthoughts
+4. Start with **human-in-the-loop** and gradually increase autonomy as trust is established
+
+## References
+
+- Yao et al., "ReAct: Synergizing Reasoning and Acting in Language Models" (2023)
+- Shinn et al., "Reflexion: Language Agents with Verbal Reinforcement Learning" (2023)
+- Chase, "LangChain: Building applications with LLMs through composability" (2023)

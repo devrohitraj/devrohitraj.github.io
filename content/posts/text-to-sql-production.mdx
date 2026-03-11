@@ -1,0 +1,178 @@
+---
+title: "Building a Production-Grade Text-to-SQL System"
+description: "How to build a reliable natural language to SQL engine: schema awareness, query validation, error recovery, and safety guardrails for enterprise databases."
+date: "2026-02-22"
+tags: ["LLM", "NLP", "SQL", "Production"]
+category: "AI Research"
+published: true
+---
+
+## Introduction
+
+Text-to-SQL is one of the most practically valuable LLM applications in enterprise settings. Finance analysts, operations teams, and business users could query databases directly without SQL expertise — if it actually worked reliably.
+
+The gap between "demo works" and "deployed to 5,000 employees" is enormous. This post covers the architecture for a system that actually earns trust.
+
+## Why Naive Text-to-SQL Fails
+
+The common pattern:
+
+```python
+# The demo approach — breaks in production
+prompt = f"Convert to SQL: {user_query}"
+sql = llm.generate(prompt)
+results = db.execute(sql)  # 💥
+```
+
+Failure modes:
+- **Hallucinated table/column names** — model invents schema that doesn't exist
+- **Unsafe queries** — `DELETE`, `DROP`, `UPDATE` from a "SELECT" intent
+- **Dialect mismatch** — PostgreSQL vs. Snowflake vs. BigQuery syntax differences
+- **Ambiguous queries** — "show me recent sales" — recent means what exactly?
+
+## Architecture: The Reliable Text-to-SQL Pipeline
+
+```
+User Query
+    │
+    ▼
+┌─────────────┐
+│ Schema      │ ← Dynamic schema injection from metadata store
+│ Retrieval   │
+└──────┬──────┘
+       │
+    ▼
+┌─────────────┐
+│ SQL         │ ← LLM generates SQL with COT reasoning
+│ Generation  │
+└──────┬──────┘
+       │
+    ▼
+┌─────────────┐
+│ Validation  │ ← Parse + validate before execution
+└──────┬──────┘
+       │
+    ▼
+┌─────────────┐
+│ Safe        │ ← Allowlist only SELECT, enforce row limits
+│ Execution   │
+└──────┬──────┘
+       │
+    ▼
+┌─────────────┐
+│ Result      │ ← Summarize results in natural language
+│ Explanation │
+└─────────────┘
+```
+
+## Step 1: Dynamic Schema Injection
+
+Don't dump the entire schema into the prompt — it's too large and distracts the model. Use semantic search to retrieve only the relevant tables:
+
+```python
+async def get_relevant_schema(query: str, top_k: int = 5) -> str:
+    """Retrieve only schema elements relevant to the query."""
+    query_embedding = await embed(query)
+
+    # Schema metadata pre-embedded at startup
+    relevant_tables = await schema_vector_store.search(
+        query_embedding, top_k=top_k
+    )
+
+    schema_prompt = ""
+    for table in relevant_tables:
+        schema_prompt += f"""
+Table: {table.name}
+Description: {table.description}
+Columns:
+{chr(10).join(f"  - {col.name} ({col.type}): {col.description}" for col in table.columns)}
+Sample values: {table.sample_values}
+"""
+    return schema_prompt
+```
+
+## Step 2: SQL Generation with Validation
+
+```python
+SQL_GENERATION_PROMPT = """
+You are an expert SQL analyst. Generate a SQL query for the following request.
+
+## Available Schema
+{schema}
+
+## User Request
+{user_query}
+
+## Rules
+- Use ONLY tables and columns listed in the schema above
+- Always include a LIMIT clause (max 1000 rows)
+- Use only SELECT statements — never INSERT, UPDATE, DELETE, DROP, ALTER
+- Add meaningful column aliases for readability
+- Use CTEs for complex queries
+
+## Response Format
+<reasoning>
+[Explain your query logic]
+</reasoning>
+<sql>
+[Your SQL query here]
+</sql>
+"""
+
+def validate_sql(sql: str) -> tuple[bool, str]:
+    """Parse and validate SQL before execution."""
+    import sqlglot
+
+    try:
+        parsed = sqlglot.parse_one(sql)
+    except Exception as e:
+        return False, f"SQL parse error: {e}"
+
+    # Safety checks
+    if parsed.find(sqlglot.exp.Insert, sqlglot.exp.Update, sqlglot.exp.Delete, sqlglot.exp.Drop):
+        return False, "Only SELECT queries are allowed"
+
+    if not parsed.find(sqlglot.exp.Limit):
+        return False, "Query must include a LIMIT clause"
+
+    return True, "Valid"
+```
+
+## Step 3: Error Recovery
+
+When validation fails, feed the error back to the LLM for self-correction:
+
+```python
+async def generate_with_retry(query: str, schema: str, max_retries: int = 3) -> str:
+    error_context = ""
+
+    for attempt in range(max_retries):
+        prompt = SQL_GENERATION_PROMPT.format(
+            schema=schema,
+            user_query=query,
+        ) + error_context
+
+        response = await llm.generate(prompt)
+        sql = extract_sql(response)
+
+        is_valid, error = validate_sql(sql)
+        if is_valid:
+            return sql
+
+        # Feed error back for self-correction
+        error_context = f"\n\nPrevious attempt failed: {error}\nPlease fix and try again."
+
+    raise ValueError(f"Failed to generate valid SQL after {max_retries} attempts")
+```
+
+## Key Takeaways
+
+1. **Schema retrieval > schema dumping** — retrieve relevant tables semantically
+2. **Always validate before execution** — `sqlglot` is excellent for this
+3. **Restrict to SELECT only** — enforce via parse tree, not regex
+4. **Self-correction loops** dramatically improve reliability
+
+## References
+
+- Gao et al., "Text-to-SQL Empowered by Large Language Models: A Benchmark Evaluation" (2023)
+- Yu et al., "Spider: A Large-Scale Human-Labeled Dataset for Complex and Cross-Domain SQL" (2018)

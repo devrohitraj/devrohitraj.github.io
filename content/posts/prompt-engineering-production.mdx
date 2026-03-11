@@ -1,0 +1,139 @@
+---
+title: "Prompt Engineering for Production: Beyond Basic Prompts"
+description: "Moving past toy prompts — a systematic guide to prompt design patterns, reliability techniques, and testing strategies for production LLM applications."
+date: "2026-03-08"
+tags: ["LLM", "Prompt Engineering", "Production"]
+category: "Engineering"
+published: true
+---
+
+## Introduction
+
+Prompt engineering gets dismissed as a "soft" skill. In reality, it's one of the highest-leverage engineering disciplines in the LLM era. A well-crafted prompt can turn an average model into a specialist — and a poor one can make even GPT-4 produce garbage.
+
+This post covers the patterns that matter for **production systems** where reliability, consistency, and debuggability are non-negotiable.
+
+## The Production Prompt Problem
+
+In demos, prompts look like this:
+
+```
+Summarize this document: {document}
+```
+
+In production, they need to handle:
+- Documents 10x longer than the context window
+- Adversarial user inputs (prompt injection)
+- Structured outputs that downstream systems depend on
+- Consistent formatting across thousands of diverse inputs
+- Graceful failure modes when the model is confused
+
+## Pattern 1: Role + Context + Constraint + Output Format
+
+The four-part template that consistently outperforms ad-hoc prompts:
+
+```python
+SYSTEM_PROMPT = """
+## Role
+You are a senior financial analyst specializing in credit risk assessment at a major bank.
+
+## Context
+You will be given loan application data and must evaluate default risk.
+
+## Constraints
+- Base your assessment ONLY on the provided data
+- Do not make assumptions beyond what is given
+- If data is insufficient, say "INSUFFICIENT_DATA" 
+- Never recommend approval/denial — only provide risk metrics
+
+## Output Format
+Return a JSON object with exactly these fields:
+{{
+  "risk_score": <integer 1-100>,
+  "risk_tier": <"LOW" | "MEDIUM" | "HIGH" | "CRITICAL">,
+  "key_factors": [<list of max 3 driving factors>],
+  "data_gaps": [<list of missing information that would change the assessment>]
+}}
+"""
+```
+
+## Pattern 2: Chain-of-Thought with Output Isolation
+
+COT dramatically improves reasoning accuracy — but you need to separate the thinking from the final answer:
+
+```python
+COT_PROMPT = """
+Analyze the following financial statement.
+
+<thinking>
+Work through your analysis step by step here. Consider:
+1. Revenue trends
+2. Margin evolution  
+3. Working capital dynamics
+4. Solvency indicators
+</thinking>
+
+<answer>
+[Your structured conclusion here — this is what gets parsed]
+</answer>
+"""
+
+def extract_answer(response: str) -> str:
+    """Extract only the answer section, discarding the reasoning."""
+    import re
+    match = re.search(r"<answer>(.*?)</answer>", response, re.DOTALL)
+    return match.group(1).strip() if match else response
+```
+
+## Pattern 3: Few-Shot Examples as Schema Enforcers
+
+Few-shot examples are the most reliable way to enforce output schema:
+
+```python
+FEW_SHOT_EXAMPLES = [
+    {
+        "input": "Revenue grew 12% YoY, margins compressed 200bps",
+        "output": '{"trend": "positive_growth_margin_pressure", "confidence": 0.85}'
+    },
+    {
+        "input": "Q3 revenue declined 5%, operating leverage improved",
+        "output": '{"trend": "revenue_decline_efficiency_gain", "confidence": 0.78}'
+    },
+]
+```
+
+## Pattern 4: Prompt Testing as Unit Tests
+
+Treat prompts like code — write tests:
+
+```python
+import pytest
+
+PROMPT_CASES = [
+    # (input, expected_field, expected_value)
+    ("Revenue +15%, Margin -100bps", "trend", "positive_growth_margin_pressure"),
+    ("INSUFFICIENT_DATA provided", "confidence", lambda x: x < 0.5),
+    ("", "error", "INSUFFICIENT_DATA"),
+]
+
+@pytest.mark.parametrize("input_text,field,expected", PROMPT_CASES)
+def test_financial_prompt(input_text, field, expected, llm_client):
+    result = llm_client.complete(SYSTEM_PROMPT + input_text)
+    parsed = json.loads(result)
+    if callable(expected):
+        assert expected(parsed[field])
+    else:
+        assert parsed[field] == expected
+```
+
+## Key Takeaways
+
+1. **Structure is everything** — Role/Context/Constraint/Format beats freeform prompts every time
+2. **Isolate reasoning from output** — Chain-of-thought in `<thinking>` tags, parsed answer separately
+3. **Test your prompts** — regression test every prompt change like code changes
+4. **Version your prompts** — store them in version control, not hardcoded strings
+
+## References
+
+- Wei et al., "Chain-of-Thought Prompting Elicits Reasoning in Large Language Models" (2022)
+- Brown et al., "Language Models are Few-Shot Learners" (2020)

@@ -1,0 +1,157 @@
+---
+title: "MLOps in 2026: The Toolchain That Actually Works"
+description: "A pragmatic overview of the modern MLOps stack — from experiment tracking and model registry to serving, monitoring, and retraining pipelines."
+date: "2026-02-28"
+tags: ["MLOps", "Infrastructure", "ML", "Production"]
+category: "Engineering"
+published: true
+---
+
+## Introduction
+
+MLOps has matured significantly. The days of Jupyter notebooks in production are (mostly) over. This is the toolchain I recommend after years of running ML systems at scale — opinionated, battle-tested, pragmatic.
+
+## The Modern MLOps Stack
+
+```
+┌─────────────────────────────────────────────────┐
+│                  Orchestration                  │
+│              Prefect / Airflow 3                │
+├──────────────┬──────────────────────────────────┤
+│   Training   │         Serving                 │
+│   PyTorch    │   vLLM / Triton / FastAPI        │
+│   Lightning  │         + ONNX                  │
+├──────────────┼──────────────────────────────────┤
+│  Experiment  │       Feature Store              │
+│  MLflow /    │      Feast / Hopsworks           │
+│  W&B         │                                 │
+├──────────────┼──────────────────────────────────┤
+│ Model Registry│       Monitoring                │
+│  MLflow /    │  Prometheus + Grafana            │
+│  HF Hub      │  + Evidently AI (drift)          │
+└──────────────┴──────────────────────────────────┘
+```
+
+## Phase 1: Experiment Tracking
+
+**Rule**: Every experiment should be reproducible from a single commit hash + config file.
+
+```python
+import mlflow
+import mlflow.pytorch
+
+mlflow.set_experiment("fraud-detection-v2")
+
+with mlflow.start_run(run_name="baseline-lgbm") as run:
+    mlflow.log_params({
+        "model_type": "lightgbm",
+        "n_estimators": 500,
+        "learning_rate": 0.05,
+        "feature_set": "v3"
+    })
+
+    model = train_model(params, X_train, y_train)
+
+    metrics = evaluate(model, X_val, y_val)
+    mlflow.log_metrics(metrics)
+
+    # Log the model with its input schema
+    mlflow.lightgbm.log_model(
+        model,
+        artifact_path="model",
+        signature=mlflow.models.infer_signature(X_train, y_train)
+    )
+
+    print(f"Run ID: {run.info.run_id}")
+```
+
+## Phase 2: Feature Store
+
+The most underrated component of an ML platform. Without it, feature engineering code duplicates across training and serving.
+
+```python
+from feast import FeatureStore
+
+store = FeatureStore(repo_path=".")
+
+# Training: point-in-time correct feature retrieval
+training_df = store.get_historical_features(
+    entity_df=entity_df,  # customer_id + event_timestamp
+    features=[
+        "customer_stats:avg_txn_amount_30d",
+        "customer_stats:num_declines_7d",
+        "merchant_stats:fraud_rate_90d",
+    ],
+).to_df()
+
+# Serving: same features, low-latency
+online_features = store.get_online_features(
+    features=["customer_stats:avg_txn_amount_30d"],
+    entity_rows=[{"customer_id": 12345}],
+).to_dict()
+```
+
+This eliminates **training-serving skew** — the #1 silent killer of ML models in production.
+
+## Phase 3: Model Serving
+
+For LLMs, use **vLLM**. For classical ML, **Triton Inference Server** or **FastAPI**.
+
+```python
+# FastAPI model server with proper health checks
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import mlflow
+
+app = FastAPI()
+model = mlflow.pyfunc.load_model("models:/fraud-detector/Production")
+
+class PredictionRequest(BaseModel):
+    features: dict[str, float]
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "model_version": model.metadata.run_id[:8]}
+
+@app.post("/predict")
+def predict(request: PredictionRequest):
+    try:
+        score = model.predict([request.features])[0]
+        return {"fraud_score": float(score), "decision": "BLOCK" if score > 0.85 else "ALLOW"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+```
+
+## Phase 4: Monitoring
+
+The three things you must monitor for every model in production:
+
+| Signal | What it catches | Tool |
+|--------|----------------|------|
+| **Data drift** | Input distribution shift | Evidently AI |
+| **Prediction drift** | Score distribution shift | Custom + Grafana |
+| **Business metrics** | Actual fraud caught/missed | Datadog / Grafana |
+
+```python
+from evidently.report import Report
+from evidently.metric_preset import DataDriftPreset
+
+report = Report(metrics=[DataDriftPreset()])
+report.run(reference_data=training_df, current_data=production_df_last_7d)
+
+# Alert if drift detected in key features
+if report.as_dict()["metrics"][0]["result"]["dataset_drift"]:
+    alert_on_call("Data drift detected — consider retraining")
+```
+
+## Key Takeaways
+
+1. **Feature store is the most impactful investment** you can make for a mature ML team
+2. **MLflow is the sweet spot** — powerful, open-source, self-hostable
+3. **Monitor three layers**: data, predictions, business metrics
+4. **Automate retraining triggers** based on drift signals, not a calendar
+
+## References
+
+- Sculley et al., "Hidden Technical Debt in Machine Learning Systems" (2015)
+- Kleppmann, "Designing Data-Intensive Applications" (2017)

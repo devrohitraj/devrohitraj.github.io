@@ -1,0 +1,122 @@
+---
+title: "Vector Databases Demystified: Choosing the Right One for Your AI Stack"
+description: "A practical comparison of Pinecone, Weaviate, Qdrant, pgvector, and Chroma — covering indexing algorithms, performance tradeoffs, and when to use each."
+date: "2026-03-05"
+tags: ["Vector DB", "RAG", "Infrastructure", "Search"]
+category: "Engineering"
+published: true
+---
+
+## Introduction
+
+Vector databases are the backbone of modern RAG systems. But choosing the wrong one can mean rebuilding your entire retrieval layer six months later. This post cuts through the marketing to help you make an informed architectural decision.
+
+## What Makes a Vector Database Different
+
+Traditional databases optimize for exact match lookups. Vector databases optimize for **approximate nearest neighbor (ANN) search** — finding vectors that are most similar to a query vector in high-dimensional space.
+
+The core operation is:
+
+$$
+\text{top-k} = \arg\min_{i \in \mathcal{D}} \, d(\mathbf{q}, \mathbf{v}_i)
+$$
+
+Where $d$ is a distance metric (cosine, L2, dot product), $\mathbf{q}$ is the query vector, and $\mathcal{D}$ is the vector corpus.
+
+The key algorithmic challenge: exhaustive search is $O(n \cdot d)$ — too slow at scale. ANN algorithms trade some accuracy for speed.
+
+## The Main ANN Algorithms
+
+### HNSW (Hierarchical Navigable Small World)
+The dominant algorithm in production systems. Builds a multi-layer graph:
+- **Pros**: Fast queries, excellent recall, dynamic inserts
+- **Cons**: High memory usage (~100 bytes/vector extra overhead)
+- **Used by**: Weaviate, Qdrant, pgvector
+
+### IVF (Inverted File Index)
+Clusters vectors into `n_lists`, searches only relevant clusters:
+- **Pros**: Lower memory, fast bulk index
+- **Cons**: Requires re-training when distribution shifts, slower inserts
+- **Used by**: Faiss, Pinecone (hybrid)
+
+### DiskANN
+Index lives on SSD, not RAM — enables massive scale on commodity hardware:
+- **Pros**: Very low memory, scales to billions
+- **Cons**: Higher latency than in-memory HNSW
+- **Used by**: Weaviate (disk mode), Azure AI Search
+
+## Feature Comparison
+
+| Feature | Pinecone | Weaviate | Qdrant | pgvector | Chroma |
+|---------|---------|---------|--------|---------|--------|
+| Deployment | Managed only | Self-host / Cloud | Self-host / Cloud | Self-host | Self-host |
+| Algorithm | HNSW + IVF | HNSW | HNSW | HNSW / IVF | HNSW |
+| Filtered search | ✅ | ✅ | ✅ Best-in-class | ✅ | Limited |
+| Hybrid (dense+sparse) | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Multi-tenancy | ✅ Namespaces | ✅ Multi-tenancy | ✅ Collections | Schema-level | ❌ |
+| Max dimensions | 20,000 | 65,535 | 65,535 | 2,000 | 32,768 |
+| Best for | Startups, fast setup | Complex schemas | High performance | Postgres shops | Prototyping |
+
+## When to Use Each
+
+### Use **pgvector** if:
+- Your data is already in PostgreSQL
+- You need ACID transactions with vector search
+- Scale is < 1M vectors
+
+```sql
+-- Trivial to add to existing Postgres schema
+CREATE TABLE embeddings (
+    id BIGSERIAL PRIMARY KEY,
+    document_id BIGINT REFERENCES documents(id),
+    embedding vector(1536),  -- OpenAI ada-002 dimension
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX ON embeddings USING hnsw (embedding vector_cosine_ops);
+
+-- Search
+SELECT document_id, 1 - (embedding <=> $1) AS similarity
+FROM embeddings
+ORDER BY embedding <=> $1
+LIMIT 10;
+```
+
+### Use **Qdrant** if:
+- You need best-in-class filtered search performance
+- Self-hosting is acceptable
+- You have complex payload filtering needs
+
+```python
+from qdrant_client import QdrantClient
+from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+results = client.search(
+    collection_name="financial_docs",
+    query_vector=query_embedding,
+    query_filter=Filter(
+        must=[
+            FieldCondition(key="year", match=MatchValue(value=2025)),
+            FieldCondition(key="doc_type", match=MatchValue(value="10-K")),
+        ]
+    ),
+    limit=10,
+)
+```
+
+### Use **Pinecone** if:
+- You want zero infrastructure management
+- Your team doesn't want to run databases
+- You can absorb the cost (expensive at scale)
+
+## Key Takeaways
+
+1. **For most teams starting out**: pgvector if you're on Postgres, Qdrant if you want a dedicated db
+2. **Filtered search quality** varies enormously — benchmark your actual query patterns
+3. **Don't prematurely optimize**: Chroma is fine for prototyping, migrate when you need to
+4. **Dimensions matter**: text embedding models use 768–3072; multimodal models can go higher
+
+## References
+
+- Malkov & Yashunin, "Efficient and Robust Approximate Nearest Neighbor Search Using HNSW" (2018)
+- Johnson et al., "Billion-scale similarity search with GPUs" (2021)
