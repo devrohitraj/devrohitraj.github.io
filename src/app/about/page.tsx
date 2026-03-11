@@ -11,7 +11,7 @@ const timeline = [
   {
     company: "American Express",
     role: "Senior AI Engineer",
-    period: "Present",
+    period: "Dec 2019 - Present",
     description:
       "Building enterprise-scale AI systems: LLM-powered agentic workflows, RAG pipelines, and ML infrastructure for financial products.",
     current: true,
